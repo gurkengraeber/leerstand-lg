@@ -1,209 +1,265 @@
-import os
-import sqlite3
-import uuid
-from telegram import Update, InputMediaPhoto
+import os, re, uuid, sqlite3, datetime
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+)
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, filters,
-    ContextTypes, ConversationHandler
+    Application, CommandHandler, ContextTypes, ConversationHandler,
+    MessageHandler, filters
 )
+with open("config.json") as f:
+    config = json.load(f)
 
-TOKEN = "7962546126:AAFjNgrwm9dMG_aquR03ChmS_GijTlRg9Aw"
-ADMIN_USERNAMES = {"ohne_u", "ANDERER_USERNAME"}
+TOKEN = config["telegram_token"]
 
-DB_FILE = "bot.db"
-BILD_ORDNER = "bilder"
-os.makedirs(BILD_ORDNER, exist_ok=True)
+ADMIN_USERNAMES = {"ohne_u", "ANDERER_USERNAME"}   #   zweite Admin-ID ergänzen
 
-# ---- DB SETUP ----
-conn = sqlite3.connect(DB_FILE)
-c = conn.cursor()
-c.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY,
-    telegram_id INTEGER,
-    username TEXT,
-    punkte INTEGER DEFAULT 0,
-    is_admin INTEGER DEFAULT 0
-)
-""")
-c.execute("""
-CREATE TABLE IF NOT EXISTS meldungen (
-    id INTEGER PRIMARY KEY,
-    user_id INTEGER,
-    image_path TEXT,
-    adresse TEXT,
-    dauer TEXT,
-    bestaetigungen INTEGER DEFAULT 0,
-    FOREIGN KEY(user_id) REFERENCES users(id)
-)
-""")
-conn.commit()
-conn.close()
+DB_FILE      = "bot.db"
+BILDER_ORDNER = "bilder"
+os.makedirs(BILDER_ORDNER, exist_ok=True)
 
-# ---- Conversation states ----
-FOTO, ADRESSE, DAUER = range(3)
+# ──────────────────────────────────  Datenbank  ──────────────────────────────────
+def init_db():
+    with sqlite3.connect(DB_FILE) as con:
+        c = con.cursor()
+        c.execute("""CREATE TABLE IF NOT EXISTS users(
+            id INTEGER PRIMARY KEY,
+            telegram_id INTEGER UNIQUE,
+            alias TEXT,
+            punkte INTEGER DEFAULT 0,
+            is_admin INTEGER DEFAULT 0)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS meldungen(
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER,
+            image_path TEXT,
+            adresse TEXT,
+            dauer TEXT,
+            bestaetigungen INTEGER DEFAULT 0,
+            FOREIGN KEY(user_id) REFERENCES users(id))""")
+        con.commit()
+init_db()
 
-# ---- Hilfsfunktionen ----
-def get_user_id(telegram_id, username):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT id FROM users WHERE telegram_id = ?", (telegram_id,))
-    row = c.fetchone()
-    if row:
-        user_id = row[0]
-    else:
-        is_admin = 1 if username in ADMIN_USERNAMES else 0
-        c.execute("INSERT INTO users (telegram_id, username, punkte, is_admin) VALUES (?, ?, 0, ?)",
-                  (telegram_id, username, is_admin))
-        user_id = c.lastrowid
-        conn.commit()
-    conn.close()
-    return user_id
+# ───────────────────────────── Conversation-States ──────────────────────────────
+NAME, FOTO, ADRESSE, DAUER = range(4)
 
-# ---- COMMANDS ----
+# ───────────────────────────── Hilfsfunktionen DB  ──────────────────────────────
+def get_or_create_user(tg_id: int, tg_username: str):
+    with sqlite3.connect(DB_FILE) as con:
+        c = con.cursor()
+        c.execute("SELECT id, alias FROM users WHERE telegram_id=?", (tg_id,))
+        row = c.fetchone()
+        if row:
+            return row[0], row[1]                           # id, alias
+        # noch nicht vorhanden → Dummy-Eintrag ohne Alias
+        is_admin = 1 if tg_username in ADMIN_USERNAMES else 0
+        c.execute("INSERT INTO users(telegram_id,is_admin) VALUES(?,?)",
+                  (tg_id, is_admin))
+        con.commit()
+        return c.lastrowid, None                            # alias fehlt
+
+def add_points(user_id: int, pts: int):
+    with sqlite3.connect(DB_FILE) as con:
+        con.execute("UPDATE users SET punkte = punkte + ? WHERE id=?",(pts,user_id))
+        con.commit()
+
+def top_five():
+    with sqlite3.connect(DB_FILE) as con:
+        c = con.cursor()
+        c.execute("SELECT alias, punkte FROM users WHERE alias IS NOT NULL "
+                  "ORDER BY punkte DESC LIMIT 5")
+        return c.fetchall()       # list[tuple(alias, punkte)]
+
+def save_meldung(user_id, img_path, adresse, dauer):
+    with sqlite3.connect(DB_FILE) as con:
+        con.execute("""INSERT INTO meldungen
+                       (user_id,image_path,adresse,dauer)
+                       VALUES(?,?,?,?)""",
+                    (user_id,img_path,adresse,dauer))
+        con.commit()
+
+def list_meldungen():
+    with sqlite3.connect(DB_FILE) as con:
+        c = con.cursor()
+        c.execute("""SELECT id,image_path,adresse,dauer,bestaetigungen
+                     FROM meldungen""")
+        return c.fetchall()
+
+# ───────────────────────────── Inline-Bestenliste  ──────────────────────────────
+def build_ranking_keyboard():
+    rows = top_five()
+    buttons = [
+        [InlineKeyboardButton(f"{alias} – {pts} Pkt", callback_data="noop")]
+        for alias, pts in rows
+    ] or [[InlineKeyboardButton("Noch keine Einträge", callback_data="noop")]]
+    return InlineKeyboardMarkup(buttons)
+
+# ───────────────────────────────── Bot-Handler ──────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    get_user_id(user.id, user.username or "")
-    await update.message.reply_text("Du bist jetzt registriert. Nutze /melde, um Leerstand zu melden.")
+    tg_user = update.effective_user
+    uid, alias = get_or_create_user(tg_user.id, tg_user.username or "")
+    if alias:
+        await update.message.reply_text(
+            f"Willkommen zurück, {alias}! Nutze /melde, um Leerstand einzugeben.",
+            reply_markup=build_ranking_keyboard())
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text(
+            "Willkommen! Bitte wähle deinen Anzeigenamen für die Bestenliste:")
+        return NAME
 
+async def name_setzen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    alias = update.message.text.strip()[:30]           # max 30 Zeichen
+    tg_user = update.effective_user
+    with sqlite3.connect(DB_FILE) as con:
+        con.execute("UPDATE users SET alias=? WHERE telegram_id=?",
+                    (alias, tg_user.id))
+        con.commit()
+    await update.message.reply_text(
+        f"Dein Name ist gespeichert: {alias}\n"
+        "Nutze /melde, um deinen ersten Leerstand zu melden.",
+        reply_markup=build_ranking_keyboard())
+    return ConversationHandler.END
+
+# ── Melde-Ablauf ──
 async def melde_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bitte sende mir ein Foto des Leerstands.")
+    await update.message.reply_text("Bitte schicke ein Foto des Leerstands.")
     return FOTO
 
 async def foto_erhalten(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    photo = update.message.photo[-1]
-    file = await photo.get_file()
-    dateiname = f"{uuid.uuid4()}.jpg"
-    pfad = os.path.join(BILD_ORDNER, dateiname)
+    if not update.message.photo:
+        await update.message.reply_text("Bitte ein *Foto* senden.")
+        return FOTO
+    file = await update.message.photo[-1].get_file()
+    fname = f"{uuid.uuid4()}.jpg"
+    pfad = os.path.join(BILDER_ORDNER, fname)
     await file.download_to_drive(pfad)
-    context.user_data["bild"] = pfad
-    await update.message.reply_text("Danke! Jetzt bitte die Adresse.")
+    context.user_data["img"] = pfad
+    await update.message.reply_text(
+        "Danke! Jetzt die Adresse im Format:\n"
+        "`Straße Hausnummer, Stadt`\n"
+        "Beispiel: `Musterstraße 12, Berlin`", parse_mode="Markdown")
     return ADRESSE
 
+def validate_address(addr: str):
+    if "," not in addr:
+        return "Komma zwischen Straße+Nr. und Stadt fehlt."
+    street_part, city_part = [s.strip() for s in addr.split(",",1)]
+    if not re.search(r"\d", street_part):
+        return "Hausnummer fehlt."
+    if len(city_part.split()) < 1:
+        return "Stadtname fehlt."
+    return None   # alles ok
+
 async def adresse_erhalten(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["adresse"] = update.message.text
-    await update.message.reply_text("Wie lange steht die Wohnung deiner Schätzung nach schon leer?")
+    addr = update.message.text.strip()
+    error = validate_address(addr)
+    if error:
+        await update.message.reply_text(
+            f"❌ {error}\nBitte noch einmal korrekt eingeben.")
+        return ADRESSE
+    context.user_data["addr"] = addr
+    await update.message.reply_text(
+        "Geschätzte Dauer des Leerstands (z. B. 'seit 6 Monaten')?")
     return DAUER
 
 async def dauer_erhalten(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    dauer = update.message.text
-    user = update.effective_user
-    user_id = get_user_id(user.id, user.username or "")
-    bild = context.user_data["bild"]
-    adresse = context.user_data["adresse"]
-
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT INTO meldungen (user_id, image_path, adresse, dauer) VALUES (?, ?, ?, ?)",
-              (user_id, bild, adresse, dauer))
-    c.execute("UPDATE users SET punkte = punkte + 5 WHERE id = ?", (user_id,))
-    conn.commit()
-    conn.close()
-
-    await update.message.reply_text("Danke, deine Meldung wurde gespeichert. Du bekommst 5 Punkte!")
+    dauer = update.message.text.strip()
+    tg_user  = update.effective_user
+    uid, _   = get_or_create_user(tg_user.id, tg_user.username or "")
+    save_meldung(uid, context.user_data["img"],
+                 context.user_data["addr"], dauer)
+    add_points(uid, 5)
+    await update.message.reply_text(
+        "✅ Meldung gespeichert! (+5 Punkte)",
+        reply_markup=build_ranking_keyboard())
     return ConversationHandler.END
 
-async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT username, punkte FROM users ORDER BY punkte DESC LIMIT 5")
-    rows = c.fetchall()
-    conn.close()
-
-    text = "🏆 Bestenliste:\n\n"
-    for i, (username, punkte) in enumerate(rows, 1):
-        name = username if username else f"User {i}"
-        text += f"{i}. {name}: {punkte} Punkte\n"
-    await update.message.reply_text(text)
-
+# ── Bestehende Meldungen auflisten ──
 async def meldungen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT id, image_path, adresse, dauer, bestaetigungen FROM meldungen")
-    rows = c.fetchall()
-    conn.close()
-
-    for id, pfad, adresse, dauer, bestaetigungen in rows:
-        caption = f"Meldung #{id}\nAdresse: {adresse}\nDauer: {dauer}\nBestätigungen: {bestaetigungen}\n/bestaetige_{id}"
+    for mid, path, addr, dauer, conf in list_meldungen():
+        caption = (f"#{mid} – {addr}\nDauer: {dauer}\n"
+                   f"Bestätigt: {conf}\n/bestaetige_{mid}")
         try:
-            with open(pfad, "rb") as f:
+            with open(path,"rb") as f:
                 await update.message.reply_photo(f, caption=caption)
-        except:
-            await update.message.reply_text(f"Meldung #{id} (Bild fehlt)\nAdresse: {adresse}")
+        except FileNotFoundError:
+            await update.message.reply_text(caption)
 
+# ── Bestätigen ──
 async def bestaetige(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if not text.startswith("/bestaetige_"):
-        return
-    try:
-        meldung_id = int(text.split("_")[1])
-    except:
-        return
+    mid = int(update.message.text.split("_")[1])
+    with sqlite3.connect(DB_FILE) as con:
+        c = con.cursor()
+        c.execute("SELECT user_id FROM meldungen WHERE id=?", (mid,))
+        row = c.fetchone()
+        if not row:
+            await update.message.reply_text("Meldung nicht gefunden.")
+            return
+        melder = row[0]
+        add_points(melder, 3)
+        c.execute("UPDATE meldungen SET bestaetigungen = bestaetigungen + 1"
+                  " WHERE id=?", (mid,))
+        con.commit()
+    await update.message.reply_text("Bestätigung gespeichert (+3 Punkte).",
+                                    reply_markup=build_ranking_keyboard())
 
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT user_id FROM meldungen WHERE id = ?", (meldung_id,))
-    row = c.fetchone()
-    if row:
-        user_id = row[0]
-        c.execute("UPDATE users SET punkte = punkte + 3 WHERE id = ?", (user_id,))
-        c.execute("UPDATE meldungen SET bestaetigungen = bestaetigungen + 1 WHERE id = ?", (meldung_id,))
-        conn.commit()
-        await update.message.reply_text("Bestätigung gespeichert. Melder erhält 3 Punkte.")
-    else:
-        await update.message.reply_text("Meldung nicht gefunden.")
-    conn.close()
+# ── Ranking-Befehl ──
+async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🏆 Aktuelle Top 5:",
+                                    reply_markup=build_ranking_keyboard())
 
+# ── Admin: löschen ──
 async def loesche(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    username = user.username or ""
-    if username not in ADMIN_USERNAMES:
-        await update.message.reply_text("Du bist kein Admin.")
+    if (update.effective_user.username or "") not in ADMIN_USERNAMES:
+        await update.message.reply_text("Nicht autorisiert.")
         return
-
-    try:
-        meldung_id = int(context.args[0])
-    except:
-        await update.message.reply_text("Verwende: /loesche <ID>")
+    if not context.args:
+        await update.message.reply_text("Verwendung: /loesche <ID>")
         return
-
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT image_path FROM meldungen WHERE id = ?", (meldung_id,))
-    row = c.fetchone()
-    if row:
+    mid = int(context.args[0])
+    with sqlite3.connect(DB_FILE) as con:
+        c = con.cursor()
+        c.execute("SELECT image_path FROM meldungen WHERE id=?", (mid,))
+        row = c.fetchone()
+        if not row:
+            await update.message.reply_text("Meldung nicht gefunden.")
+            return
         pfad = row[0]
         if os.path.exists(pfad):
             os.remove(pfad)
-        c.execute("DELETE FROM meldungen WHERE id = ?", (meldung_id,))
-        conn.commit()
-        await update.message.reply_text(f"Meldung #{meldung_id} gelöscht.")
-    else:
-        await update.message.reply_text("Meldung nicht gefunden.")
-    conn.close()
+        c.execute("DELETE FROM meldungen WHERE id=?", (mid,))
+        con.commit()
+    await update.message.reply_text(f"Meldung #{mid} gelöscht.")
 
-# ---- Bot Setup ----
+# ─────────────────────────────  Bot-Initialisierung  ────────────────────────────
 def main():
     app = Application.builder().token(TOKEN).build()
 
-    conv_handler = ConversationHandler(
+    # Name-Festlegung beim ersten Start
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_setzen)]},
+        fallbacks=[],
+        allow_reentry=True))
+
+    # Melde-Dialog
+    melde_conv = ConversationHandler(
         entry_points=[CommandHandler("melde", melde_start)],
         states={
-            FOTO: [MessageHandler(filters.PHOTO, foto_erhalten)],
+            FOTO:    [MessageHandler(filters.PHOTO, foto_erhalten)],
             ADRESSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, adresse_erhalten)],
-            DAUER: [MessageHandler(filters.TEXT & ~filters.COMMAND, dauer_erhalten)],
+            DAUER:   [MessageHandler(filters.TEXT & ~filters.COMMAND, dauer_erhalten)]
         },
         fallbacks=[],
     )
+    app.add_handler(melde_conv)
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(conv_handler)
-    app.add_handler(CommandHandler("ranking", ranking))
+    # Sonstige Commands
     app.add_handler(CommandHandler("meldungen", meldungen))
-    app.add_handler(CommandHandler("loesche", loesche))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"^/bestaetige_\d+"), bestaetige))
+    app.add_handler(CommandHandler("ranking",   ranking))
+    app.add_handler(CommandHandler("loesche",   loesche))
+    app.add_handler(MessageHandler(filters.Regex(r"^/bestaetige_\d+$"), bestaetige))
 
-    print("Bot läuft ...")
+    print("Bot läuft …")
     app.run_polling()
 
 if __name__ == "__main__":
