@@ -24,7 +24,7 @@ main_keyboard = ReplyKeyboardMarkup(
 # Konfiguration laden
 with open("config.json") as f:
     config = json.load(f)
-TOKEN = config["TOKEN"]
+TOKEN = config["telegram_token"]
 
 # Datenbank initialisieren
 conn = sqlite3.connect("bot.db")
