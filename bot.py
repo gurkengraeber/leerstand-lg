@@ -11,7 +11,7 @@ import json
 with open("config.json") as f:
     config = json.load(f)
 
-BOT_TOKEN = config["telegram_token"]
+TOKEN = config["telegram_token"]
 
 ADMIN_USERNAMES = {"ohne_u", "ANDERER_USERNAME"}   #   zweite Admin-ID ergänzen
 
