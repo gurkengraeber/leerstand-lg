@@ -12,13 +12,12 @@ with open("config.json") as f:
     config = json.load(f)
 
 TOKEN = config["telegram_token"]
-ADMIN_USERNAMES = {"ohne_u", "ANDERER_USERNAME"}  # Ergänze hier deine Admin-Namen
+ADMIN_USERNAMES = {"ohne_u", "ANDERER_USERNAME"}
 
 DB_FILE = "bot.db"
 BILDER_ORDNER = "bilder"
 os.makedirs(BILDER_ORDNER, exist_ok=True)
 
-# Datenbank initialisieren
 def init_db():
     with sqlite3.connect(DB_FILE) as con:
         c = con.cursor()
@@ -33,6 +32,7 @@ def init_db():
             user_id INTEGER,
             image_path TEXT,
             adresse TEXT,
+            wohnungslage TEXT,
             dauer TEXT,
             bestaetigungen INTEGER DEFAULT 0,
             FOREIGN KEY(user_id) REFERENCES users(id))""")
@@ -40,10 +40,6 @@ def init_db():
 
 init_db()
 
-# Status-States
-NAME, ADRESSE, FOTO, DAUER = range(4)
-
-# Hilfsfunktionen für DB
 def get_or_create_user(tg_id: int, tg_username: str):
     with sqlite3.connect(DB_FILE) as con:
         c = con.cursor()
@@ -73,12 +69,12 @@ def top_five():
         c.execute("SELECT alias, punkte FROM users WHERE alias IS NOT NULL ORDER BY punkte DESC LIMIT 5")
         return c.fetchall()
 
-def save_meldung(user_id, img_path, adresse, dauer):
+def save_meldung(user_id, img_path, adresse, wohnungslage, dauer):
     try:
         with sqlite3.connect(DB_FILE) as con:
-            con.execute("""INSERT INTO meldungen (user_id, image_path, adresse, dauer)
-                           VALUES (?, ?, ?, ?)""",
-                        (user_id, img_path, adresse, dauer))
+            con.execute("""INSERT INTO meldungen (user_id, image_path, adresse, wohnungslage, dauer)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (user_id, img_path, adresse, wohnungslage, dauer))
             con.commit()
     except Exception as e:
         raise Exception(f"Fehler beim Speichern in die Datenbank: {e}")
@@ -86,17 +82,16 @@ def save_meldung(user_id, img_path, adresse, dauer):
 def list_meldungen():
     with sqlite3.connect(DB_FILE) as con:
         c = con.cursor()
-        c.execute("""SELECT id, image_path, adresse, dauer, bestaetigungen FROM meldungen""")
+        c.execute("""SELECT id, image_path, adresse, wohnungslage, dauer, bestaetigungen FROM meldungen""")
         return c.fetchall()
 
 def get_user_meldungen(user_id):
     with sqlite3.connect(DB_FILE) as con:
         c = con.cursor()
-        c.execute("""SELECT id, image_path, adresse, dauer, bestaetigungen 
+        c.execute("""SELECT id, image_path, adresse, wohnungslage, dauer, bestaetigungen 
                      FROM meldungen WHERE user_id = ? ORDER BY id DESC""", (user_id,))
         return c.fetchall()
 
-# Hauptmenü erstellen
 def build_main_menu():
     keyboard = [
         [InlineKeyboardButton("🏠 Neue Meldung", callback_data='neue_meldung')],
@@ -173,11 +168,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         for m in meldungen:
-            mid, path, addr, dauer, conf = m
-            caption = f"#{mid} – {addr}\n⏰ Dauer: {dauer}\n✅ Bestätigt: {conf}x"
+            mid, path, addr, wohnungslage, dauer, conf = m
+            caption = f"#{mid} – {addr}\n🏠 Lage: {wohnungslage}\n⏰ Dauer: {dauer}\n✅ Bestätigt: {conf}x"
             try:
-                with open(path, "rb") as f:
-                    await update.effective_chat.send_photo(f, caption=caption)
+                if path:
+                    with open(path, "rb") as f:
+                        await update.effective_chat.send_photo(f, caption=caption)
+                else:
+                    await update.effective_chat.send_message(caption)
             except Exception as e:
                 await update.effective_chat.send_message(f"❌ Foto nicht verfügbar\n{caption}")
     elif data == 'back_to_menu':
@@ -225,14 +223,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ {error}\nBitte nochmals eingeben:")
             return
         context.user_data['adresse'] = text
-        await update.message.reply_text("📸 Danke! Jetzt bitte ein Foto des Leerstands schicken.")
+        await update.message.reply_text(
+            "🏠 Wie ist die Wohnungslage? (z.B. Vorderhaus, 3. OG, Hinterhaus, Seitenflügel...)"
+        )
+        context.user_data['meldung_step'] = 'wohnungslage'
+    elif step == 'wohnungslage':
+        if len(text) < 2:
+            await update.message.reply_text("❌ Bitte beschreibe die Lage etwas genauer!")
+            return
+        context.user_data['wohnungslage'] = text
+        await update.message.reply_text(
+            "📸 Optional: Schicke ein Foto des Leerstands oder schreibe 'überspringen', um ohne Foto fortzufahren."
+        )
         context.user_data['meldung_step'] = 'foto'
+    elif step == 'foto':
+        # Nur Text: Prüfen auf 'überspringen'
+        if text.lower() == "überspringen":
+            context.user_data['img_path'] = None
+            await update.message.reply_text(
+                "⏰ Wie lange steht die Wohnung schon leer? (z.B. 'seit 6 Monaten')"
+            )
+            context.user_data['meldung_step'] = 'dauer'
+            return
+        else:
+            await update.message.reply_text(
+                "Bitte schicke ein Foto oder schreibe 'überspringen'."
+            )
+            return
     elif step == 'dauer':
         dauer = text.strip()
         adresse = context.user_data.get('adresse')
+        wohnungslage = context.user_data.get('wohnungslage')
         img_path = context.user_data.get('img_path')
-        # Prüfe, ob alle Daten vorhanden sind
-        if not adresse or not img_path or not dauer:
+        if not adresse or not wohnungslage or not dauer:
             await update.message.reply_text(
                 "❌ Es fehlen Angaben! Bitte beginne die Meldung erneut.",
                 reply_markup=build_main_menu()
@@ -240,7 +263,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.clear()
             return
         try:
-            save_meldung(uid, img_path, adresse, dauer)
+            save_meldung(uid, img_path, adresse, wohnungslage, dauer)
             add_points(uid, 5)
         except Exception as e:
             await update.message.reply_text(
@@ -252,6 +275,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "✅ *Meldung erfolgreich gespeichert!*\n\n"
             f"📍 **Adresse:** {adresse}\n"
+            f"🏠 **Lage:** {wohnungslage}\n"
             f"⏰ **Dauer:** {dauer}\n\n"
             "Vielen Dank für deine Meldung! (+5 Punkte) 🙏",
             reply_markup=build_main_menu(),
@@ -272,7 +296,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_drive(pfad)
         context.user_data['img_path'] = pfad
         await update.message.reply_text(
-            "⏰ Danke! Wie lange steht die Wohnung schon leer? (z.B. 'seit 6 Monaten')"
+            "⏰ Wie lange steht die Wohnung schon leer? (z.B. 'seit 6 Monaten')"
         )
         context.user_data['meldung_step'] = 'dauer'
     else:
@@ -286,11 +310,14 @@ async def meldungen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not all_meldungen:
         await update.message.reply_text("Noch keine Meldungen vorhanden.")
         return
-    for mid, path, addr, dauer, conf in all_meldungen:
-        caption = f"#{mid} – {addr}\n⏰ Dauer: {dauer}\n✅ Bestätigt: {conf}x"
+    for mid, path, addr, wohnungslage, dauer, conf in all_meldungen:
+        caption = f"#{mid} – {addr}\n🏠 Lage: {wohnungslage}\n⏰ Dauer: {dauer}\n✅ Bestätigt: {conf}x"
         try:
-            with open(path, "rb") as f:
-                await update.message.reply_photo(f, caption=caption)
+            if path:
+                with open(path, "rb") as f:
+                    await update.message.reply_photo(f, caption=caption)
+            else:
+                await update.message.reply_text(caption)
         except:
             await update.message.reply_text(f"❌ Foto nicht verfügbar\n{caption}")
 
@@ -344,7 +371,7 @@ async def loesche(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Meldung nicht gefunden.")
             return
         pfad = row[0]
-        if os.path.exists(pfad):
+        if pfad and os.path.exists(pfad):
             os.remove(pfad)
         c.execute("DELETE FROM meldungen WHERE id=?", (mid,))
         con.commit()
