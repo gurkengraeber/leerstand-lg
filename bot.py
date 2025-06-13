@@ -270,39 +270,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['meldung_step'] = 'dauer'
         
     elif step == 'dauer':
-    wohnung = context.user_data.get('wohnung', 'Unbekannt')
-    img_path = context.user_data.get('img_path')
-    adresse = context.user_data.get('adresse')
-    
-    # Prüfen, ob alle Daten vorhanden sind
-    if not img_path:
-        await update.message.reply_text(
-            "❌ Es fehlt noch das Foto. Bitte sende zuerst ein Foto des Leerstands."
-        )
-        context.user_data['meldung_step'] = 'foto'
-        return
-    if not adresse:
-        await update.message.reply_text(
-            "❌ Es fehlt noch die Adresse. Bitte gib die Adresse im Format `Straße Hausnummer, Stadt` ein."
-        )
-        context.user_data['meldung_step'] = 'adresse'
-        return
+        wohnung = context.user_data.get('wohnung', 'Unbekannt')
+        img_path = context.user_data.get('img_path')
+        adresse = context.user_data.get('adresse')
+        
+        # Prüfen, ob alle Daten vorhanden sind
+        if not img_path:
+            await update.message.reply_text(
+                "❌ Es fehlt noch das Foto. Bitte sende zuerst ein Foto des Leerstands."
+            )
+            context.user_data['meldung_step'] = 'foto'
+            return
+        if not adresse:
+            await update.message.reply_text(
+                "❌ Es fehlt noch die Adresse. Bitte gib die Adresse im Format `Straße Hausnummer, Stadt` ein.",
+                parse_mode="Markdown"
+            )
+            context.user_data['meldung_step'] = 'adresse'
+            return
 
-    save_meldung(uid, img_path, adresse, text, wohnung)
-    add_points(uid, 5)
-
-    await update.message.reply_text(
-        "✅ *Meldung erfolgreich gespeichert!*\n\n"
-        f"📍 **Adresse:** {adresse}\n"
-        f"🏠 **Wohnung:** {wohnung}\n"
-        f"⏰ **Dauer:** {text}\n\n"
-        "Vielen Dank für deine Meldung! (+5 Punkte) 🙏",
-        reply_markup=build_main_menu(),
-        parse_mode='Markdown'
-    )
-    
-    # User data zurücksetzen
-    context.user_data.clear()
+        save_meldung(uid, img_path, adresse, text, wohnung)
+        add_points(uid, 5)
+        
+        await update.message.reply_text(
+            "✅ *Meldung erfolgreich gespeichert!*\n\n"
+            f"📍 **Adresse:** {adresse}\n"
+            f"🏠 **Wohnung:** {wohnung}\n"
+            f"⏰ **Dauer:** {text}\n\n"
+            "Vielen Dank für deine Meldung! (+5 Punkte) 🙏",
+            reply_markup=build_main_menu(),
+            parse_mode='Markdown'
+        )
+        
+        # User data zurücksetzen
+        context.user_data.clear()
         
     else:
         # Standardantwort mit Menü
