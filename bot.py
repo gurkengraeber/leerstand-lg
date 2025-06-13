@@ -12,10 +12,9 @@ with open("config.json") as f:
     config = json.load(f)
 
 TOKEN = config["telegram_token"]
+ADMIN_USERNAMES = {"ohne_u", "ANDERER_USERNAME"}  # Ergänze hier Admin-Namen
 
-ADMIN_USERNAMES = {"ohne_u", "ANDERER_USERNAME"}   # zweite Admin-ID ergänzen
-
-DB_FILE      = "bot.db"
+DB_FILE = "bot.db"
 BILDER_ORDNER = "bilder"
 os.makedirs(BILDER_ORDNER, exist_ok=True)
 
@@ -111,7 +110,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"Willkommen zurück, {alias}!",
             reply_markup=reply_markup)
-        return ConversationHandler.END
+        return
     else:
         await update.message.reply_text(
             "Willkommen! Bitte wähle eine Option:", reply_markup=reply_markup)
@@ -119,6 +118,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Bitte gib die genauen Details deiner Wohnung an (z.B. Stockwerk, Seite, Vorder/Hinterhaus).")
         return WOHNUNG
+
+# Handler für Button-Klicks / Textnachrichten auf Buttons
+async def handle_start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "Neue Meldung 📸":
+        await start_meldung(update, context)
+    elif text == "Top 5 📈":
+        await ranking(update, context)
+    elif text == "Meine Meldungen 📝":
+        await meldungen(update, context)
+    else:
+        # Falls eine andere Nachricht, starte normal
+        await start(update, context)
+
+# ── Neue Meldung starten
+async def start_meldung(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_user = update.effective_user
+    uid, _ = get_or_create_user(tg_user.id, tg_user.username or "")
+
+    await update.message.reply_text(
+        "Bitte gib die genauen Details deiner Wohnung an (z.B. Stockwerk, Seite, Vorder/Hinterhaus).")
+    return WOHNUNG
 
 async def wohnung_erhalten(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wohnung = update.message.text.strip()
@@ -174,9 +195,9 @@ async def dauer_erhalten(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "✅ Meldung gespeichert! (+5 Punkte)",
         reply_markup=build_ranking_keyboard())
-    return ConversationHandler.END
+    return
 
-# ── Bestehende Meldungen auflisten ──
+# ── Liste aller Meldungen
 async def meldungen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for mid, path, addr, dauer, wohnung, conf in list_meldungen():
         caption = (f"#{mid} – {addr}\n"
@@ -190,7 +211,7 @@ async def meldungen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except FileNotFoundError:
             await update.message.reply_text(caption)
 
-# ── Bestätigen ──
+# ── Bestätigen
 async def bestaetige(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mid = int(update.message.text.split("_")[1])
     with sqlite3.connect(DB_FILE) as con:
@@ -208,12 +229,12 @@ async def bestaetige(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bestätigung gespeichert (+3 Punkte).",
                                     reply_markup=build_ranking_keyboard())
 
-# ── Ranking-Befehl ──
+# ── Ranking anzeigen
 async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🏆 Aktuelle Top 5:",
                                     reply_markup=build_ranking_keyboard())
 
-# ── Admin: löschen ──
+# ── Admin: löschen
 async def loesche(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if (update.effective_user.username or "") not in ADMIN_USERNAMES:
         await update.message.reply_text("Nicht autorisiert.")
@@ -240,35 +261,31 @@ async def loesche(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TOKEN).build()
 
-    # Name-Festlegung beim ersten Start
-    app.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            WOHNUNG: [MessageHandler(filters.TEXT & ~filters.COMMAND, wohnung_erhalten)],
-            FOTO:    [MessageHandler(filters.PHOTO, foto_erhalten)],
-            ADRESSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, adresse_erhalten)],
-            DAUER:   [MessageHandler(filters.TEXT & ~filters.COMMAND, dauer_erhalten)]
-        },
-        fallbacks=[],
-        allow_reentry=True))
+    # Start-Handler
+    app.add_handler(CommandHandler("start", start))
+    # Für Button-Ansprache
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_start_button))
 
-    # Melde-Dialog
-    melde_conv = ConversationHandler(
-        entry_points=[CommandHandler("melde", start)],
+    # Meldung starten
+    app.add_handler(CommandHandler("melde", start_meldung))
+
+    # States für Meldung
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("melde", start_meldung)],
         states={
             WOHNUNG: [MessageHandler(filters.TEXT & ~filters.COMMAND, wohnung_erhalten)],
             FOTO:    [MessageHandler(filters.PHOTO, foto_erhalten)],
             ADRESSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, adresse_erhalten)],
             DAUER:   [MessageHandler(filters.TEXT & ~filters.COMMAND, dauer_erhalten)]
         },
-        fallbacks=[],
-    )
-    app.add_handler(melde_conv)
+        fallbacks=[]
+    ))
 
     # Sonstige Commands
     app.add_handler(CommandHandler("meldungen", meldungen))
-    app.add_handler(CommandHandler("ranking",   ranking))
-    app.add_handler(CommandHandler("loesche",   loesche))
+    app.add_handler(CommandHandler("ranking", ranking))
+    app.add_handler(CommandHandler("loesche", loesche))
+    # Für die Bestätigung
     app.add_handler(MessageHandler(filters.Regex(r"^/bestaetige_\d+$"), bestaetige))
 
     print("Bot läuft …")
