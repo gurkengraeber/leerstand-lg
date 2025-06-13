@@ -13,16 +13,17 @@ python3 bot.py
 Läuft als Service
 sudo systemctl stop leerstand-bot
 
-zum aktualiseren
+#zum aktualiseren
 cd /root/leerstand-lg
 
 git status
 
 git pull origin main
 
+sudo systemctl restart leerstand-bot
 
 
-Wurde als systemd Service gespeichert (dauerhaft):
+### Wurde als systemd Service gespeichert (dauerhaft):
 
 bashsudo nano /etc/systemd/system/leerstand-bot.service
 
