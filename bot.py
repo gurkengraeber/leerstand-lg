@@ -1,295 +1,91 @@
-import os, re, uuid, sqlite3, datetime
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, ReplyKeyboardMarkup
+import logging
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+
+# Konfiguriere das Logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
-from telegram.ext import (
-    Application, CommandHandler, ContextTypes, ConversationHandler,
-    MessageHandler, filters
-)
-import json
 
-with open("config.json") as f:
-    config = json.load(f)
+# Beispiel-Datenbank (in der Realität solltest du eine echte Datenbank verwenden)
+user_meldungen = {}  # Schlüssel: user_id, Wert: List von Meldungen
 
-TOKEN = config["telegram_token"]
-ADMIN_USERNAMES = {"ohne_u", "ANDERER_USERNAME"}  # Ergänze hier Admin-Namen
+# Funktion, um Meldungen zu speichern
+def add_meldung(user_id, meldung):
+    if user_id not in user_meldungen:
+        user_meldungen[user_id] = []
+    user_meldungen[user_id].append(meldung)
 
-DB_FILE = "bot.db"
-BILDER_ORDNER = "bilder"
-os.makedirs(BILDER_ORDNER, exist_ok=True)
+# Funktion, um alle Meldungen eines Nutzers abzurufen
+def get_user_meldungen(user_id):
+    return user_meldungen.get(user_id, [])
 
-# ──────────────────────────────────  Datenbank  ──────────────────────────────────
-def init_db():
-    with sqlite3.connect(DB_FILE) as con:
-        c = con.cursor()
-        c.execute("""CREATE TABLE IF NOT EXISTS users(
-            id INTEGER PRIMARY KEY,
-            telegram_id INTEGER UNIQUE,
-            alias TEXT,
-            punkte INTEGER DEFAULT 0,
-            is_admin INTEGER DEFAULT 0)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS meldungen(
-            id INTEGER PRIMARY KEY,
-            user_id INTEGER,
-            image_path TEXT,
-            adresse TEXT,
-            dauer TEXT,
-            wohnung TEXT,
-            bestaetigungen INTEGER DEFAULT 0,
-            FOREIGN KEY(user_id) REFERENCES users(id))""")
-        con.commit()
-init_db()
-
-# ───────────────────────────── Conversation-States ──────────────────────────────
-NAME, WOHNUNG, FOTO, ADRESSE, DAUER = range(5)
-
-# ───────────────────────────── Hilfsfunktionen DB  ──────────────────────────────
-def get_or_create_user(tg_id: int, tg_username: str):
-    with sqlite3.connect(DB_FILE) as con:
-        c = con.cursor()
-        c.execute("SELECT id, alias FROM users WHERE telegram_id=?", (tg_id,))
-        row = c.fetchone()
-        if row:
-            return row[0], row[1]
-        is_admin = 1 if tg_username in ADMIN_USERNAMES else 0
-        c.execute("INSERT INTO users(telegram_id,is_admin) VALUES(?,?)",
-                  (tg_id, is_admin))
-        con.commit()
-        return c.lastrowid, None
-
-def add_points(user_id: int, pts: int):
-    with sqlite3.connect(DB_FILE) as con:
-        con.execute("UPDATE users SET punkte = punkte + ? WHERE id=?",(pts,user_id))
-        con.commit()
-
-def top_five():
-    with sqlite3.connect(DB_FILE) as con:
-        c = con.cursor()
-        c.execute("SELECT alias, punkte FROM users WHERE alias IS NOT NULL "
-                  "ORDER BY punkte DESC LIMIT 5")
-        return c.fetchall()
-
-def save_meldung(user_id, img_path, adresse, dauer, wohnung):
-    with sqlite3.connect(DB_FILE) as con:
-        con.execute("""INSERT INTO meldungen
-                       (user_id,image_path,adresse,dauer,wohnung)
-                       VALUES(?,?,?,?,?)""",
-                    (user_id,img_path,adresse,dauer,wohnung))
-        con.commit()
-
-def list_meldungen():
-    with sqlite3.connect(DB_FILE) as con:
-        c = con.cursor()
-        c.execute("""SELECT id,image_path,adresse,dauer,wohnung,bestaetigungen
-                     FROM meldungen""")
-        return c.fetchall()
-
-# ───────────────────────────── Inline-Bestenliste  ──────────────────────────────
-def build_ranking_keyboard():
-    rows = top_five()
-    buttons = [
-        [InlineKeyboardButton(f"{alias} – {pts} Pkt", callback_data="noop")]
-        for alias, pts in rows
-    ] or [[InlineKeyboardButton("Noch keine Einträge", callback_data="noop")]]
-    return InlineKeyboardMarkup(buttons)
-
-# ───────────────────────────────── Bot-Handler ──────────────────────────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tg_user = update.effective_user
-    uid, alias = get_or_create_user(tg_user.id, tg_user.username or "")
-
-    # Buttons für den Start
+# Funktion zum Erstellen des Menüs
+def build_menu():
     keyboard = [
-        ["Neue Meldung 📸"],
-        ["Top 5 📈"],
-        ["Meine Meldungen 📝"]
+        [InlineKeyboardButton("Neue Meldung 📸", callback_data='neue_meldung')],
+        [InlineKeyboardButton("Top 5 📈", callback_data='top5')],
+        [InlineKeyboardButton("Meine Meldungen 📝", callback_data='meine_meldungen')]
     ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    return InlineKeyboardMarkup(keyboard)
 
-    if alias:
-        await update.message.reply_text(
-            f"Willkommen zurück, {alias}!",
-            reply_markup=reply_markup)
-        return
+# /start Befehl
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Willkommen! Wähle eine Option:",
+        reply_markup=build_menu()
+    )
+
+# Callback-Handler für Button-Klicks
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == 'neue_meldung':
+        await query.edit_message_text("Bitte gib die Details deiner Wohnung und schick sie ab.")
+        # Hier kannst du den nächsten Schritt starten, z.B. auf eine Nachricht warten
+        # Für dieses Beispiel warten wir auf eine Nachricht vom Nutzer
+        context.user_data['awaiting_meldung'] = True
+
+    elif data == 'top5':
+        # Beispiel: Top 5 anzeigen
+        await query.edit_message_text("Hier sind die Top 5 Wohnungen:\n1. Wohnung A\n2. Wohnung B\n3. Wohnung C\n4. Wohnung D\n5. Wohnung E")
+        
+    elif data == 'meine_meldungen':
+        meldungen = get_user_meldungen(update.effective_user.id)
+        if meldungen:
+            meldungen_text = "\n".join(f"{i+1}. {m}" for i, m in enumerate(meldungen))
+            await query.edit_message_text(f"Deine Meldungen:\n{meldungen_text}")
+        else:
+            await query.edit_message_text("Du hast noch keine Meldungen.")
+
+# Handler, um die Eingabe der neuen Meldung zu erfassen
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('awaiting_meldung'):
+        meldung_text = update.message.text
+        user_id = update.effective_user.id
+        add_meldung(user_id, meldung_text)
+        await update.message.reply_text("Deine Meldung wurde gespeichert!", reply_markup=build_menu())
+        # Reset
+        context.user_data['awaiting_meldung'] = False
     else:
-        await update.message.reply_text(
-            "Willkommen! Bitte wähle eine Option:", reply_markup=reply_markup)
-        # Direkt die Frage nach der Wohnung stellen
-        await update.message.reply_text(
-            "Bitte gib die genauen Details deiner Wohnung an (z.B. Stockwerk, Seite, Vorder/Hinterhaus).")
-        return WOHNUNG
+        # Standardnachricht
+        await update.message.reply_text("Bitte benutze die Buttons im Menü.")
 
-# Handler für Button-Klicks / Textnachrichten auf Buttons
-async def handle_start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if text == "Neue Meldung 📸":
-        await start_meldung(update, context)
-    elif text == "Top 5 📈":
-        await ranking(update, context)
-    elif text == "Meine Meldungen 📝":
-        await meldungen(update, context)
-    else:
-        # Falls eine andere Nachricht, starte normal
-        await start(update, context)
+async def main():
+    # Ersetze 'YOUR_BOT_TOKEN' durch dein Bot-Token
+    application = Application.builder().token('YOUR_BOT_TOKEN').build()
 
-# ── Neue Meldung starten
-async def start_meldung(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tg_user = update.effective_user
-    uid, _ = get_or_create_user(tg_user.id, tg_user.username or "")
+    # Handler hinzufügen
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    await update.message.reply_text(
-        "Bitte gib die genauen Details deiner Wohnung an (z.B. Stockwerk, Seite, Vorder/Hinterhaus).")
-    return WOHNUNG
+    # Bot starten
+    await application.run_polling()
 
-async def wohnung_erhalten(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    wohnung = update.message.text.strip()
-    context.user_data["wohnung"] = wohnung
-    await update.message.reply_text("Danke! Jetzt schicke ein Foto des Leerstands.")
-    return FOTO
-
-async def foto_erhalten(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.photo:
-        await update.message.reply_text("Bitte ein *Foto* senden.")
-        return FOTO
-    file = await update.message.photo[-1].get_file()
-    fname = f"{uuid.uuid4()}.jpg"
-    pfad = os.path.join(BILDER_ORDNER, fname)
-    await file.download_to_drive(pfad)
-    context.user_data["img"] = pfad
-    await update.message.reply_text(
-        "Danke! Jetzt die Adresse im Format:\n"
-        "`Straße Hausnummer, Stadt`\n"
-        "Beispiel: `Musterstraße 12, Berlin`", parse_mode="Markdown")
-    return ADRESSE
-
-def validate_address(addr: str):
-    if "," not in addr:
-        return "Komma zwischen Straße+Nr. und Stadt fehlt."
-    street_part, city_part = [s.strip() for s in addr.split(",",1)]
-    if not re.search(r"\d", street_part):
-        return "Hausnummer fehlt."
-    if len(city_part.split()) < 1:
-        return "Stadtname fehlt."
-    return None
-
-async def adresse_erhalten(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    addr = update.message.text.strip()
-    error = validate_address(addr)
-    if error:
-        await update.message.reply_text(
-            f"❌ {error}\nBitte noch einmal korrekt eingeben.")
-        return ADRESSE
-    context.user_data["addr"] = addr
-    await update.message.reply_text(
-        "Geschätzte Dauer des Leerstands (z. B. 'seit 6 Monaten')?")
-    return DAUER
-
-async def dauer_erhalten(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    dauer = update.message.text.strip()
-    tg_user  = update.effective_user
-    uid, _   = get_or_create_user(tg_user.id, tg_user.username or "")
-    wohnung = context.user_data.get("wohnung", "Unbekannt")
-    save_meldung(uid, context.user_data["img"],
-                 context.user_data["addr"], dauer, wohnung)
-    add_points(uid, 5)
-    await update.message.reply_text(
-        "✅ Meldung gespeichert! (+5 Punkte)",
-        reply_markup=build_ranking_keyboard())
-    return
-
-# ── Liste aller Meldungen
-async def meldungen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    for mid, path, addr, dauer, wohnung, conf in list_meldungen():
-        caption = (f"#{mid} – {addr}\n"
-                   f"Wohnung: {wohnung}\n"
-                   f"Stockwerk: {wohnung}\n"
-                   f"Dauer: {dauer}\n"
-                   f"Bestätigt: {conf}\n/bestaetige_{mid}")
-        try:
-            with open(path,"rb") as f:
-                await update.message.reply_photo(f, caption=caption)
-        except FileNotFoundError:
-            await update.message.reply_text(caption)
-
-# ── Bestätigen
-async def bestaetige(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mid = int(update.message.text.split("_")[1])
-    with sqlite3.connect(DB_FILE) as con:
-        c = con.cursor()
-        c.execute("SELECT user_id FROM meldungen WHERE id=?", (mid,))
-        row = c.fetchone()
-        if not row:
-            await update.message.reply_text("Meldung nicht gefunden.")
-            return
-        melder = row[0]
-        add_points(melder, 3)
-        c.execute("UPDATE meldungen SET bestaetigungen = bestaetigungen + 1"
-                  " WHERE id=?", (mid,))
-        con.commit()
-    await update.message.reply_text("Bestätigung gespeichert (+3 Punkte).",
-                                    reply_markup=build_ranking_keyboard())
-
-# ── Ranking anzeigen
-async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🏆 Aktuelle Top 5:",
-                                    reply_markup=build_ranking_keyboard())
-
-# ── Admin: löschen
-async def loesche(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if (update.effective_user.username or "") not in ADMIN_USERNAMES:
-        await update.message.reply_text("Nicht autorisiert.")
-        return
-    if not context.args:
-        await update.message.reply_text("Verwendung: /loesche <ID>")
-        return
-    mid = int(context.args[0])
-    with sqlite3.connect(DB_FILE) as con:
-        c = con.cursor()
-        c.execute("SELECT image_path FROM meldungen WHERE id=?", (mid,))
-        row = c.fetchone()
-        if not row:
-            await update.message.reply_text("Meldung nicht gefunden.")
-            return
-        pfad = row[0]
-        if os.path.exists(pfad):
-            os.remove(pfad)
-        c.execute("DELETE FROM meldungen WHERE id=?", (mid,))
-        con.commit()
-    await update.message.reply_text(f"Meldung #{mid} gelöscht.")
-
-# ─────────────────────────────  Bot-Initialisierung  ────────────────────────────
-def main():
-    app = Application.builder().token(TOKEN).build()
-
-    # Start-Handler
-    app.add_handler(CommandHandler("start", start))
-    # Für Button-Ansprache
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_start_button))
-
-    # Meldung starten
-    app.add_handler(CommandHandler("melde", start_meldung))
-
-    # States für Meldung
-    app.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("melde", start_meldung)],
-        states={
-            WOHNUNG: [MessageHandler(filters.TEXT & ~filters.COMMAND, wohnung_erhalten)],
-            FOTO:    [MessageHandler(filters.PHOTO, foto_erhalten)],
-            ADRESSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, adresse_erhalten)],
-            DAUER:   [MessageHandler(filters.TEXT & ~filters.COMMAND, dauer_erhalten)]
-        },
-        fallbacks=[]
-    ))
-
-    # Sonstige Commands
-    app.add_handler(CommandHandler("meldungen", meldungen))
-    app.add_handler(CommandHandler("ranking", ranking))
-    app.add_handler(CommandHandler("loesche", loesche))
-    # Für die Bestätigung
-    app.add_handler(MessageHandler(filters.Regex(r"^/bestaetige_\d+$"), bestaetige))
-
-    print("Bot läuft …")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    import asyncio
+    asyncio.run(main())
