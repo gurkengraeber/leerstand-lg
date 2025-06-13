@@ -15,10 +15,14 @@ sudo systemctl stop leerstand-bot
 
 zum aktualiseren
 cd /root/leerstand-lg
+
 git status
+
 git pull origin main
 
 
+
 Wurde als systemd Service gespeichert (dauerhaft):
+
 bashsudo nano /etc/systemd/system/leerstand-bot.service
 
