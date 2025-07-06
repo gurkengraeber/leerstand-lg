@@ -1,25 +1,4 @@
 import os, re, uuid, sqlite3, json
-
-from dotenv import load_dotenv
-import os
-import mysql.connector
-
-load_dotenv()  # lädt die Variablen aus .env
-
-def get_db_connection():
-    host = os.getenv('DB_HOST')
-    user = os.getenv('DB_USER')
-    password = os.getenv('DB_PASSWORD')
-    database = os.getenv('DB_NAME')
-    if not all([host, user, password, database]):
-        raise ValueError("Fehlende Datenbank-Umgebungsvariablen in .env")
-    return mysql.connector.connect(
-        host=host,
-        user=user,
-        password=password,
-        database=database
-    )
-
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup
 )
@@ -35,71 +14,64 @@ with open("config.json") as f:
 TOKEN = config["telegram_token"]
 ADMIN_USERNAMES = {"ohne_u", "ANDERER_USERNAME"}
 
+DB_FILE = "bot.db"
 BILDER_ORDNER = "bilder"
 os.makedirs(BILDER_ORDNER, exist_ok=True)
 
 def init_db():
-    conn = get_db_connection()
-    c = conn.cursor()
-    # Tabelle 'users' an MariaDB angepasst
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            telegram_id BIGINT UNIQUE,
-            alias VARCHAR(30),
-            punkte INT DEFAULT 0,
-            is_admin TINYINT(1) DEFAULT 0
-        )
-    """)
-    # Tabelle 'meldungen' an MariaDB angepasst
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS meldungen (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            user_id INT,
+    with sqlite3.connect(DB_FILE) as con:
+        c = con.cursor()
+        c.execute("""CREATE TABLE IF NOT EXISTS users(
+            id INTEGER PRIMARY KEY,
+            telegram_id INTEGER UNIQUE,
+            alias TEXT,
+            punkte INTEGER DEFAULT 0,
+            is_admin INTEGER DEFAULT 0)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS meldungen(
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER,
             image_path TEXT,
-            adresse VARCHAR(255),
-            wohnungslage VARCHAR(255),
-            dauer VARCHAR(255),
-            bestaetigungen INT DEFAULT 0,
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        )
-    """)
-    conn.commit()
-    conn.close()
+            adresse TEXT,
+            wohnungslage TEXT,
+            dauer TEXT,
+            bestaetigungen INTEGER DEFAULT 0,
+            FOREIGN KEY(user_id) REFERENCES users(id))""")
+        con.commit()
 
 init_db()
 
 def get_or_create_user(tg_id: int, tg_username: str):
-    with get_db_connection() as con:
+    with sqlite3.connect(DB_FILE) as con:
         c = con.cursor()
         c.execute("SELECT id, alias FROM users WHERE telegram_id=?", (tg_id,))
         row = c.fetchone()
         if row:
             return row[0], row[1]
         is_admin = 1 if tg_username in ADMIN_USERNAMES else 0
-        c.execute("INSERT INTO users(telegram_id, is_admin) VALUES(?, ?)", (tg_id, is_admin))
+        c.execute("INSERT INTO users(telegram_id,is_admin) VALUES(?,?)",
+                  (tg_id, is_admin))
         con.commit()
         return c.lastrowid, None
 
 def set_user_alias(user_id: int, alias: str):
-    with get_db_connection() as con:
+    with sqlite3.connect(DB_FILE) as con:
         con.execute("UPDATE users SET alias = ? WHERE id = ?", (alias, user_id))
         con.commit()
 
 def add_points(user_id: int, pts: int):
-    with get_db_connection() as con:
+    with sqlite3.connect(DB_FILE) as con:
         con.execute("UPDATE users SET punkte = punkte + ? WHERE id=?", (pts, user_id))
         con.commit()
 
 def top_five():
-    with get_db_connection() as con:
+    with sqlite3.connect(DB_FILE) as con:
         c = con.cursor()
         c.execute("SELECT alias, punkte FROM users WHERE alias IS NOT NULL ORDER BY punkte DESC LIMIT 5")
         return c.fetchall()
 
 def save_meldung(user_id, img_path, adresse, wohnungslage, dauer):
     try:
-        with get_db_connection() as con:
+        with sqlite3.connect(DB_FILE) as con:
             con.execute("""INSERT INTO meldungen (user_id, image_path, adresse, wohnungslage, dauer)
                            VALUES (?, ?, ?, ?, ?)""",
                         (user_id, img_path, adresse, wohnungslage, dauer))
@@ -108,13 +80,13 @@ def save_meldung(user_id, img_path, adresse, wohnungslage, dauer):
         raise Exception(f"Fehler beim Speichern in die Datenbank: {e}")
 
 def list_meldungen():
-    with get_db_connection() as con:
+    with sqlite3.connect(DB_FILE) as con:
         c = con.cursor()
         c.execute("""SELECT id, image_path, adresse, wohnungslage, dauer, bestaetigungen FROM meldungen""")
         return c.fetchall()
 
 def get_user_meldungen(user_id):
-    with get_db_connection() as con:
+    with sqlite3.connect(DB_FILE) as con:
         c = con.cursor()
         c.execute("""SELECT id, image_path, adresse, wohnungslage, dauer, bestaetigungen 
                      FROM meldungen WHERE user_id = ? ORDER BY id DESC""", (user_id,))
